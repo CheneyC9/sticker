@@ -1,8 +1,8 @@
 // make.fun sticker — drawn from scratch, Node 22 standard library only.
 //
-// One idea: your agent, on the #1 spot. A little robot (its eyes are "> <", a happy squint that is
-// also a pair of code chevrons) throws its arms up on top of a gold podium, with silver and bronze
-// below, and the make.fun wordmark underneath, whose "." is the gold medal dot.
+// One idea, in make.fun's own flat style (magenta disc, thick black outlines, white ghost with
+// sparkle eyes): the ghost holds its star badge up high, like a medal it just won. That is the site
+// in one picture: you build something, it competes, it wins. The make.fun wordmark sits below.
 //
 // Everything is signed-distance shapes rasterised with analytic anti-aliasing, then written as a
 // PNG with node:zlib. No randomness and no clock, so every run writes the same bytes.
@@ -34,18 +34,16 @@ function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
-// Paint `color` wherever sdf < 0, with a one-pixel analytic edge, inside the bounding box only.
-// Everything drawn on the sticker face is laid out once, then nudged down by `shiftY` to sit centred.
-let shiftY = 0;
-
+// Paint `color` wherever sdf < 0, with a one-pixel analytic edge (or a smooth `soft` falloff),
+// inside the bounding box only.
 function paint(sdf: SDF, box: Box, color: RGB, opacity = 1, soft = 0): void {
   const x0 = clamp(Math.floor(box[0]) - 2, 0, W - 1);
-  const y0 = clamp(Math.floor(box[1] + shiftY) - 2, 0, H - 1);
+  const y0 = clamp(Math.floor(box[1]) - 2, 0, H - 1);
   const x1 = clamp(Math.ceil(box[2]) + 2, 0, W - 1);
-  const y1 = clamp(Math.ceil(box[3] + shiftY) + 2, 0, H - 1);
+  const y1 = clamp(Math.ceil(box[3]) + 2, 0, H - 1);
   for (let y = y0; y <= y1; y++) {
     for (let x = x0; x <= x1; x++) {
-      const d = sdf(x + 0.5, y + 0.5 - shiftY);
+      const d = sdf(x + 0.5, y + 0.5);
       let a: number;
       if (soft > 0) {
         const t = clamp((d + soft) / (2 * soft), 0, 1);
@@ -61,6 +59,13 @@ function paint(sdf: SDF, box: Box, color: RGB, opacity = 1, soft = 0): void {
       buf[i + 2] += (color[2] - buf[i + 2]) * a;
     }
   }
+}
+
+// Paint a shape the make.fun way: a thick black outline, then the fill on top.
+function outlined(sdf: SDF, box: Box, fill: RGB, line: number): void {
+  const grown: Box = [box[0] - line, box[1] - line, box[2] + line, box[3] + line];
+  paint((x, y) => sdf(x, y) - line, grown, INK);
+  paint(sdf, box, fill);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -106,19 +111,55 @@ function capsule(ax: number, ay: number, bx: number, by: number, r: number): SDF
   return (x, y) => segDist(x, y, ax, ay, bx, by) - r;
 }
 
-// A stroked path: a list of segments and arcs drawn as one shape (so joints never double up).
-type Prim =
-  | { k: 's'; a: [number, number, number, number] }
-  | { k: 'a'; a: [number, number, number, number, number] };
-
-function stroke(prims: Prim[], halfWidth: number): SDF {
+// Signed distance to a closed polygon (even-odd inside test).
+function polygon(pts: [number, number][]): SDF {
   return (x, y) => {
     let d = Infinity;
-    for (const p of prims) {
-      const v = p.k === 's' ? segDist(x, y, p.a[0], p.a[1], p.a[2], p.a[3]) : arcDist(x, y, p.a[0], p.a[1], p.a[2], p.a[3], p.a[4]);
-      if (v < d) d = v;
+    let inside = false;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      const [ax, ay] = pts[j];
+      const [bx, by] = pts[i];
+      d = Math.min(d, segDist(x, y, ax, ay, bx, by));
+      if (ay > y !== by > y && x < ((bx - ax) * (y - ay)) / (by - ay) + ax) inside = !inside;
     }
-    return d - halfWidth;
+    return inside ? -d : d;
+  };
+}
+
+// A star with `n` points: tips at radius `outer`, valleys at `inner`, first tip straight up.
+function star(cx: number, cy: number, n: number, outer: number, inner: number, rot = 0): SDF {
+  const pts: [number, number][] = [];
+  for (let i = 0; i < n * 2; i++) {
+    const r = i % 2 === 0 ? outer : inner;
+    const t = ((-90 + rot + (i * 180) / n) * Math.PI) / 180;
+    pts.push([cx + r * Math.cos(t), cy + r * Math.sin(t)]);
+  }
+  return polygon(pts);
+}
+
+// A four-point sparkle with curved, pinched sides (the logo's eyes): an astroid-like shape.
+function sparkle(cx: number, cy: number, r: number): SDF {
+  const pts: [number, number][] = [];
+  for (let i = 0; i < 96; i++) {
+    const t = (i / 96) * Math.PI * 2;
+    const c = Math.cos(t);
+    const s = Math.sin(t);
+    // Exponent 3 pinches the sides inward; sign keeps each quadrant.
+    pts.push([cx + r * Math.sign(c) * Math.abs(c) ** 3, cy + r * Math.sign(s) * Math.abs(s) ** 3]);
+  }
+  return polygon(pts);
+}
+
+// Smooth unions stretch the distance field in their fillets, which blurs the edge there. Dividing
+// by the gradient's length (central differences) brings the edge back to one crisp pixel.
+function crisp(f: SDF): SDF {
+  return (x, y) => {
+    const d = f(x, y);
+    if (Math.abs(d) > 4) return d; // far from the edge only the sign matters
+    const gx = f(x + 0.5, y) - f(x - 0.5, y);
+    const gy = f(x, y + 0.5) - f(x, y - 0.5);
+    const g = Math.hypot(gx, gy);
+    return g > 1e-6 ? d / g : d;
   };
 }
 
@@ -130,8 +171,25 @@ function union(...fs: SDF[]): SDF {
   };
 }
 
+// Smooth union: blends two shapes with a fillet of radius k, so the ghost reads as one soft blob.
+function smooth(k: number, ...fs: SDF[]): SDF {
+  return (x, y) => {
+    let d = fs[0](x, y);
+    for (let i = 1; i < fs.length; i++) {
+      const e = fs[i](x, y);
+      const h = clamp(0.5 + (0.5 * (e - d)) / k, 0, 1);
+      d = e * (1 - h) + d * h - k * h * (1 - h);
+    }
+    return d;
+  };
+}
+
 // ---------------------------------------------------------------------------------------------
-// A small stroke font: glyphs in x-height units, baseline at y = 0, y down.
+// A small stroke font for the wordmark: glyphs in x-height units, baseline at y = 0, y down.
+
+type Prim =
+  | { k: 's'; a: [number, number, number, number] }
+  | { k: 'a'; a: [number, number, number, number, number] };
 
 const S = (x1: number, y1: number, x2: number, y2: number): Prim => ({ k: 's', a: [x1, y1, x2, y2] });
 const A = (cx: number, cy: number, r: number, a0: number, a1: number): Prim => ({ k: 'a', a: [cx, cy, r, a0, a1] });
@@ -144,210 +202,118 @@ const GLYPHS: Record<string, { w: number; p: Prim[] }> = {
   f: { w: 0.6, p: [S(0.18, 0, 0.18, -1.14), A(0.43, -1.14, 0.25, 180, 320), S(-0.02, -1, 0.56, -1)] },
   u: { w: 0.8, p: [S(0, -1, 0, -0.4), A(0.4, -0.4, 0.4, 0, 180), S(0.8, -1, 0.8, 0)] },
   n: { w: 0.8, p: [S(0, -1, 0, 0), A(0.4, -0.6, 0.4, 180, 360), S(0.8, -0.6, 0.8, 0)] },
-  '1': { w: 0.5, p: [S(0.32, -1, 0.32, 0), S(0.04, -0.76, 0.32, -1)] },
-  '2': { w: 0.7, p: [A(0.35, -0.68, 0.32, 195, 395), S(0.6, -0.48, 0.02, 0), S(0.02, 0, 0.7, 0)] },
-  '3': { w: 0.68, p: [A(0.32, -0.74, 0.26, 200, 450), A(0.32, -0.27, 0.29, 270, 520)] },
-  // Capitals for the tagline, in cap-height units.
-  M: { w: 0.9, p: [S(0, 0, 0, -1), S(0, -1, 0.45, -0.42), S(0.45, -0.42, 0.9, -1), S(0.9, -1, 0.9, 0)] },
-  Y: { w: 0.8, p: [S(0, -1, 0.4, -0.48), S(0.8, -1, 0.4, -0.48), S(0.4, -0.48, 0.4, 0)] },
-  A: { w: 0.84, p: [S(0, 0, 0.42, -1), S(0.42, -1, 0.84, 0), S(0.17, -0.36, 0.67, -0.36)] },
-  G: { w: 0.98, p: [A(0.5, -0.5, 0.5, 0, 318), S(0.56, -0.48, 1.0, -0.48), S(1.0, -0.48, 1.0, -0.3)] },
-  E: { w: 0.64, p: [S(0, -1, 0, 0), S(0, -1, 0.64, -1), S(0, -0.5, 0.54, -0.5), S(0, 0, 0.64, 0)] },
-  N: { w: 0.8, p: [S(0, 0, 0, -1), S(0, -1, 0.8, 0), S(0.8, 0, 0.8, -1)] },
-  T: { w: 0.76, p: [S(0, -1, 0.76, -1), S(0.38, -1, 0.38, 0)] },
-  B: { w: 0.72, p: [S(0, 0, 0, -1), S(0, -1, 0.44, -1), A(0.44, -0.755, 0.245, 270, 450), S(0.44, -0.51, 0, -0.51), A(0.47, -0.255, 0.255, 270, 450), S(0.47, 0, 0, 0)] },
-  R: { w: 0.74, p: [S(0, 0, 0, -1), S(0, -1, 0.44, -1), A(0.44, -0.74, 0.26, 270, 450), S(0.44, -0.48, 0, -0.48), S(0.36, -0.48, 0.74, 0)] },
-  O: { w: 1.0, p: [A(0.5, -0.5, 0.5, 0, 360)] },
-  U: { w: 0.8, p: [S(0, -1, 0, -0.4), A(0.4, -0.4, 0.4, 0, 180), S(0.8, -0.4, 0.8, -1)] },
-  S: { w: 0.66, p: [A(0.34, -0.755, 0.245, 90, 330), A(0.34, -0.255, 0.255, 270, 510)] },
 };
 
-// Text along the bottom of a circle, upright and reading left to right, tops toward the centre.
-// `r` is the baseline radius; each glyph gets its own rotated frame at its centre angle.
-function arcText(text: string, cx: number, cy: number, r: number, h: number, weight: number, gap: number, color: RGB): void {
-  const space = 0.45;
-  let total = 0;
-  for (const ch of text) total += (ch === ' ' ? space : GLYPHS[ch].w) + gap;
-  total -= gap;
-  let s = (total * h) / 2; // arc length still to go, left to right; the middle sits at the bottom
-  for (const ch of text) {
-    const w = ch === ' ' ? space : GLYPHS[ch].w;
-    if (ch !== ' ') {
-      const theta = 90 + ((s - (w * h) / 2) / r) * (180 / Math.PI); // larger angle = further left
-      const phi = theta - 90;
-      const pr = (phi * Math.PI) / 180;
-      const cphi = Math.cos(pr);
-      const sphi = Math.sin(pr);
-      const th = (theta * Math.PI) / 180;
-      const ox = cx + r * Math.cos(th);
-      const oy = cy + r * Math.sin(th);
-      // Glyph point (gx, gy), gx measured from the glyph's centre, rotated by phi onto the arc.
-      const map = (gx: number, gy: number): [number, number] => {
-        const lx = (gx - w / 2) * h;
-        const ly = gy * h;
-        return [ox + lx * cphi - ly * sphi, oy + lx * sphi + ly * cphi];
-      };
-      const prims = GLYPHS[ch].p.map((p): Prim => {
-        if (p.k === 's') {
-          const [ax, ay] = map(p.a[0], p.a[1]);
-          const [bx, by] = map(p.a[2], p.a[3]);
-          return { k: 's', a: [ax, ay, bx, by] };
-        }
-        const [qx, qy] = map(p.a[0], p.a[1]);
-        return { k: 'a', a: [qx, qy, p.a[2] * h, p.a[3] + phi, p.a[4] + phi] };
-      });
-      const m = h * 1.4;
-      paint(stroke(prims, (weight * h) / 2), [ox - m, oy - m, ox + m, oy + m], color);
-    }
-    s -= (w + gap) * h;
-  }
+function primDist(x: number, y: number, p: Prim): number {
+  return p.k === 's' ? segDist(x, y, p.a[0], p.a[1], p.a[2], p.a[3]) : arcDist(x, y, p.a[0], p.a[1], p.a[2], p.a[3], p.a[4]);
 }
 
-// Lay out `text` with x-height h, its baseline centred on (cx, baseY). Returns one stroke per glyph.
-function word(text: string, cx: number, baseY: number, h: number, weight: number, gap: number): { sdf: SDF; box: Box; ch: string }[] {
+// The whole word as one distance field to its centre lines (the "." is a point), so a stroke of
+// any width, and an outline around that, is one paint call each.
+function wordField(text: string, cx: number, baseY: number, h: number, gap: number): { dist: SDF; box: Box } {
   let total = 0;
-  for (const ch of text) total += (GLYPHS[ch] ? GLYPHS[ch].w : 0.2) + gap;
+  for (const ch of text) total += (GLYPHS[ch] ? GLYPHS[ch].w : 0.12) + gap;
   total -= gap;
   let x = cx - (total * h) / 2;
-  const out: { sdf: SDF; box: Box; ch: string }[] = [];
-  const hw = (weight * h) / 2;
+  const prims: Prim[] = [];
   for (const ch of text) {
     const g = GLYPHS[ch];
-    const w = g ? g.w : 0.2;
     if (g) {
-      const prims = g.p.map((p): Prim => {
-        if (p.k === 's') return { k: 's', a: [x + p.a[0] * h, baseY + p.a[1] * h, x + p.a[2] * h, baseY + p.a[3] * h] };
-        return { k: 'a', a: [x + p.a[0] * h, baseY + p.a[1] * h, p.a[2] * h, p.a[3], p.a[4]] };
-      });
-      out.push({ sdf: stroke(prims, hw), box: [x - h * 0.4, baseY - h * 1.7, x + (w + 0.4) * h, baseY + h * 0.4], ch });
+      for (const p of g.p) {
+        if (p.k === 's') prims.push({ k: 's', a: [x + p.a[0] * h, baseY + p.a[1] * h, x + p.a[2] * h, baseY + p.a[3] * h] });
+        else prims.push({ k: 'a', a: [x + p.a[0] * h, baseY + p.a[1] * h, p.a[2] * h, p.a[3], p.a[4]] });
+      }
     } else {
-      out.push({ sdf: circle(x + 0.1 * h, baseY - hw, hw * 1.25), box: [x - h * 0.3, baseY - h, x + h * 0.6, baseY + h * 0.3], ch });
+      const px = x + 0.06 * h;
+      const py = baseY - 0.06 * h;
+      prims.push({ k: 's', a: [px, py, px, py] });
     }
-    x += (w + gap) * h;
+    x += ((g ? g.w : 0.12) + gap) * h;
   }
-  return out;
+  const dist: SDF = (px, py) => {
+    let d = Infinity;
+    for (const p of prims) d = Math.min(d, primDist(px, py, p));
+    return d;
+  };
+  return { dist, box: [cx - (total * h) / 2, baseY - 1.42 * h, cx + (total * h) / 2, baseY] };
 }
 
 // ---------------------------------------------------------------------------------------------
-// Palette.
+// Palette: make.fun's magenta, ink black, white. Nothing else.
 
-const BACKDROP = hex('#ECEAE4');
+const BACKDROP = hex('#ECEAE6');
 const PAPER = hex('#FFFFFF');
-const NAVY = hex('#171A30');
-const SPOT = hex('#22264A');
-const LIME = hex('#B9F23C');
-const LIME_DARK = hex('#86C21B');
-const GOLD = hex('#FFC23D');
-const GOLD_DARK = hex('#E09A12');
-const SILVER = hex('#C8D0DF');
-const SILVER_DARK = hex('#9AA4B8');
-const BRONZE = hex('#E8925C');
-const BRONZE_DARK = hex('#C06B38');
-const PINK = hex('#FF5C8A');
-const SKY = hex('#5CC8FF');
+const INK = hex('#111114');
+const MAGENTA = hex('#C8228F');
+
+const LINE = 18; // the outline weight, everywhere
 
 // ---------------------------------------------------------------------------------------------
 // The sticker.
 
 const CX = 512;
 const CY = 512;
-const R = 440; // the navy face
-const BORDER = 26; // the white die-cut margin
 
-// Backdrop and a soft shadow, so it reads as a sticker on any page.
 for (let i = 0; i < W * H; i++) {
   buf[i * 3] = BACKDROP[0];
   buf[i * 3 + 1] = BACKDROP[1];
   buf[i * 3 + 2] = BACKDROP[2];
 }
 const full: Box = [0, 0, W, H];
-paint(circle(CX, CY + 14, R + BORDER), full, hex('#000000'), 0.22, 26);
-paint(circle(CX, CY, R + BORDER), full, PAPER);
-paint(circle(CX, CY, R), full, NAVY);
 
-shiftY = 2;
+// Die-cut: soft shadow, white margin, black ring, magenta face.
+paint(circle(CX, CY + 12, 476), full, hex('#000000'), 0.2, 22);
+paint(circle(CX, CY, 476), full, PAPER);
+paint(circle(CX, CY, 448), full, INK);
+paint(circle(CX, CY, 420), full, MAGENTA);
 
-// A spotlight behind the winner.
-paint(circle(CX, 400, 250), [CX - 260, 140, CX + 260, 660], SPOT, 1);
-paint(circle(CX, 400, 175), [CX - 190, 210, CX + 190, 590], hex('#2B3060'), 1);
+// The star badge, held high: a magenta coin with a white star, in a black outline.
+const MEDAL_X = 686;
+const MEDAL_Y = 252;
+const MEDAL_R = 70;
+outlined(circle(MEDAL_X, MEDAL_Y, MEDAL_R), [MEDAL_X - MEDAL_R, MEDAL_Y - MEDAL_R, MEDAL_X + MEDAL_R, MEDAL_Y + MEDAL_R], MAGENTA, LINE);
+paint(star(MEDAL_X, MEDAL_Y + 3, 5, 48, 21), [MEDAL_X - 52, MEDAL_Y - 52, MEDAL_X + 52, MEDAL_Y + 52], PAPER);
 
-// Confetti: fixed positions, so the bytes never change.
-const confetti: [number, number, number, RGB][] = [
-  [262, 268, 20, PINK], [318, 196, -35, GOLD], [700, 214, 40, SKY], [770, 300, -20, PINK],
-  [236, 400, 60, SKY], [790, 430, 15, GOLD], [372, 150, 75, LIME], [650, 150, -60, LIME],
-];
-for (const [x, y, deg, col] of confetti) {
-  const t = (deg * Math.PI) / 180;
-  const dx = Math.cos(t) * 13;
-  const dy = Math.sin(t) * 13;
-  paint(capsule(x - dx, y - dy, x + dx, y + dy, 6.5), [x - 24, y - 24, x + 24, y + 24], col);
+// The ghost: a dome on a rounded body with a flat bottom, a nub of a left arm and a right arm raised
+// to the badge, blended into one soft shape and outlined once.
+const GX = 474;
+const TOP = 256; // top of the dome
+const BOTTOM = 618; // the flat base
+const HALF = 126; // half the body's width
+const HAND_X = MEDAL_X - 20;
+const HAND_Y = MEDAL_Y + 78;
+const body = smooth(
+  16,
+  circle(GX, TOP + HALF, HALF),
+  roundBox(GX, (TOP + HALF + BOTTOM) / 2, HALF, (BOTTOM - TOP - HALF) / 2, 34),
+  circle(GX - HALF - 4, 500, 26),
+);
+// The raised arm leaves the body's right side and reaches up to the badge; a wide blend fills the
+// armpit so no sliver of outline is left between arm and dome.
+const ghost = smooth(40, body, smooth(10, capsule(GX + HALF - 6, 486, HAND_X - 4, HAND_Y + 8, 22), circle(HAND_X, HAND_Y, 32)));
+// The outline is the shape grown by LINE; both edges are made crisp separately.
+const ghostBox: Box = [GX - HALF - 50, TOP, MEDAL_X + 30, BOTTOM];
+paint(crisp((x, y) => ghost(x, y) - LINE), [ghostBox[0] - LINE, ghostBox[1] - LINE, ghostBox[2] + LINE, ghostBox[3] + LINE], INK);
+paint(crisp(ghost), ghostBox, PAPER);
+// The little notch between its two feet.
+paint(capsule(GX, BOTTOM, GX, BOTTOM - 30, 8), [GX - 10, BOTTOM - 40, GX + 10, BOTTOM + 10], INK);
+
+// Sparkle eyes, looking up at the badge.
+paint(sparkle(GX - 40, 388, 36), [GX - 78, 350, GX - 2, 426], INK);
+paint(sparkle(GX + 52, 378, 36), [GX + 14, 340, GX + 90, 416], INK);
+
+// A few white glints round the badge: the win, in the simplest possible way. All well inside the ring.
+for (const [x, y, r] of [[786, 262, 18], [586, 180, 14], [776, 358, 12]] as [number, number, number][]) {
+  paint(sparkle(x, y, r), [x - r, y - r, x + r, y + r], PAPER);
 }
-for (const [x, y, r, col] of [[300, 330, 7, GOLD], [728, 360, 7, LIME], [420, 228, 6, SKY], [604, 236, 6, PINK]] as [number, number, number, RGB][]) {
-  paint(circle(x, y, r), [x - r, y - r, x + r, y + r], col);
-}
 
-// Podium: 2 (silver, left), 1 (gold, centre), 3 (bronze, right), standing on one floor line.
-const FLOOR = 640;
-function block(x0: number, x1: number, top: number, face: RGB, edge: RGB, digit: string): void {
-  const cx = (x0 + x1) / 2;
-  const hw = (x1 - x0) / 2;
-  const hh = (FLOOR - top) / 2;
-  paint(roundBox(cx, top + hh, hw, hh, 12), [x0, top, x1, FLOOR], face);
-  // A lip along the top edge gives the block some depth.
-  paint(roundBox(cx, top + 9, hw, 9, 9), [x0, top, x1, top + 18], edge);
-  // The digit fills about 60% of the face below the lip, centred on it.
-  const faceH = FLOOR - top - 18;
-  const dh = Math.min(faceH * 0.6, 58);
-  const num = word(digit, cx, top + 18 + faceH / 2 + dh / 2, dh, 0.3, 0)[0];
-  paint(num.sdf, num.box, NAVY);
-}
-block(318, 438, 548, SILVER, SILVER_DARK, '2');
-block(586, 706, 566, BRONZE, BRONZE_DARK, '3');
-block(432, 592, 500, GOLD, GOLD_DARK, '1');
-paint(roundBox(CX, FLOOR + 5, 220, 5, 5), [290, FLOOR, 734, FLOOR + 10], hex('#0E1022'));
-
-// The robot, on #1.
-const FEET = 500;
-// Legs.
-paint(union(capsule(490, 456, 490, FEET - 12, 11), capsule(534, 456, 534, FEET - 12, 11)), [470, 450, 556, FEET], LIME_DARK);
-paint(union(roundBox(486, FEET - 7, 20, 8, 7), roundBox(538, FEET - 7, 20, 8, 7)), [460, FEET - 16, 562, FEET], LIME);
-// Arms up, in victory.
-const arms = union(capsule(470, 410, 408, 330, 13), capsule(554, 410, 616, 330, 13));
-paint(arms, [380, 300, 644, 430], LIME_DARK);
-paint(union(circle(404, 324, 20), circle(620, 324, 20)), [380, 300, 644, 348], LIME);
-// Body.
-paint(roundBox(CX, 424, 56, 44, 22), [450, 376, 574, 472], LIME);
-paint(roundBox(CX, 430, 30, 18, 9), [480, 410, 544, 450], LIME_DARK);
-paint(circle(CX, 430, 7), [500, 420, 524, 440], GOLD);
-// Neck and head.
-paint(roundBox(CX, 374, 20, 12, 6), [490, 360, 534, 388], LIME_DARK);
-paint(roundBox(CX, 306, 92, 70, 34), [418, 234, 606, 378], LIME);
-// Ears.
-paint(union(roundBox(414, 306, 10, 24, 8), roundBox(610, 306, 10, 24, 8)), [400, 280, 624, 332], LIME_DARK);
-// Antenna.
-paint(capsule(CX, 236, CX, 196, 6), [500, 186, 524, 240], LIME_DARK);
-paint(circle(CX, 186, 16), [494, 168, 530, 204], PINK);
-paint(circle(CX - 5, 181, 5), [500, 172, 512, 190], hex('#FFB3C8'));
-// Face screen.
-paint(roundBox(CX, 310, 68, 46, 20), [440, 262, 584, 358], NAVY);
-// Eyes: "> <".
-const eyes = stroke([
-  { k: 's', a: [462, 286, 488, 302] }, { k: 's', a: [488, 302, 462, 318] },
-  { k: 's', a: [562, 286, 536, 302] }, { k: 's', a: [536, 302, 562, 318] },
-], 7);
-paint(eyes, [450, 276, 574, 328], LIME);
-// A grin.
-paint(stroke([{ k: 'a', a: [CX, 322, 18, 25, 155] }], 6), [488, 320, 536, 348], LIME);
-// Cheeks.
-paint(union(circle(468, 336, 8), circle(556, 336, 8)), [456, 324, 568, 348], PINK, 0.55);
-
-// The wordmark: make.fun, with the "." in gold.
-const mark = word('make.fun', CX, 774, 80, 0.25, 0.32);
-for (const g of mark) paint(g.sdf, g.box, g.ch === '.' ? GOLD : PAPER);
-
-// The tagline, curving round the bottom of the face.
-shiftY = 0;
-arcText('MY AGENT BEAT YOURS', CX, CY, 412, 25, 0.24, 0.3, LIME);
+// The wordmark: chunky white make.fun, outlined in black like the ghost.
+const WORD_H = 68;
+const WORD_W = 0.32 * WORD_H; // stroke weight
+const word = wordField('make.fun', CX, 792, WORD_H, 0.32);
+const wb: Box = [word.box[0] - 40, word.box[1] - 40, word.box[2] + 40, word.box[3] + 40];
+paint((x, y) => word.dist(x, y) - WORD_W / 2 - 14, wb, INK);
+paint((x, y) => word.dist(x, y) - WORD_W / 2, wb, PAPER);
 
 // ---------------------------------------------------------------------------------------------
 // PNG out.
