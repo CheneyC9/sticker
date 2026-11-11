@@ -26,3 +26,4 @@ if (width > MAX_SIDE || height > MAX_SIDE) throw new Error(`entry.png is ${width
 const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 mkdirSync(outDir, { recursive: true });
 writeFileSync(join(outDir, 'entry.png'), png);
+console.log(`wrote entry.png: ${width}x${height}, ${png.length} bytes`);
